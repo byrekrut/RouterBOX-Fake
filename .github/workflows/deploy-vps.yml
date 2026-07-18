@@ -1,0 +1,102 @@
+name: Deploy RouterBOX-Fake to VPS
+
+on:
+  workflow_dispatch:
+    inputs:
+      routerbox_domain:
+        description: Public domain for MyFakeSite
+        required: true
+        default: delend.space
+      routebox_panel_domain:
+        description: Domain for the RouteBox panel
+        required: true
+        default: panel.delend.space
+      routebox_email:
+        description: Let's Encrypt email for the RouteBox panel
+        required: true
+        default: admin@delend.space
+      routebox_panel_port:
+        description: HTTPS port for the RouteBox panel
+        required: true
+        default: '8443'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install SSH client tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y openssh-client rsync
+
+      - name: Prepare SSH key and config
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          JUMP_USER: ${{ secrets.JUMP_USER }}
+          JUMP_HOST: ${{ secrets.JUMP_HOST }}
+          JUMP_PORT: ${{ secrets.JUMP_PORT || '22' }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+        run: |
+          test -n "$SSH_PRIVATE_KEY"
+          test -n "$JUMP_USER"
+          test -n "$JUMP_HOST"
+          test -n "$JUMP_PORT"
+          test -n "$VPS_USER"
+          test -n "$VPS_HOST"
+
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/routerbox_deploy_key
+          chmod 600 ~/.ssh/routerbox_deploy_key
+
+          cat > ~/.ssh/config <<CONFIG
+          Host routerbox-jump
+            HostName $JUMP_HOST
+            Port $JUMP_PORT
+            User $JUMP_USER
+            IdentityFile ~/.ssh/routerbox_deploy_key
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+
+          Host routerbox-vps
+            HostName $VPS_HOST
+            User $VPS_USER
+            IdentityFile ~/.ssh/routerbox_deploy_key
+            ProxyJump routerbox-jump
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+          CONFIG
+          chmod 600 ~/.ssh/config
+
+      - name: Upload repository to VPS
+        run: |
+          ssh routerbox-vps 'rm -rf /opt/RouterBOX-Fake && mkdir -p /opt/RouterBOX-Fake'
+          rsync -az --delete ./ routerbox-vps:/opt/RouterBOX-Fake/
+
+      - name: Run installer on VPS
+        env:
+          ROUTERBOX_DOMAIN: ${{ inputs.routerbox_domain }}
+          ROUTEBOX_PANEL_DOMAIN: ${{ inputs.routebox_panel_domain }}
+          ROUTEBOX_EMAIL: ${{ inputs.routebox_email }}
+          ROUTEBOX_PANEL_PORT: ${{ inputs.routebox_panel_port }}
+        run: |
+          ssh routerbox-vps \
+            "ROUTERBOX_DOMAIN='$ROUTERBOX_DOMAIN' \
+             ROUTEBOX_PANEL_DOMAIN='$ROUTEBOX_PANEL_DOMAIN' \
+             ROUTEBOX_EMAIL='$ROUTEBOX_EMAIL' \
+             ROUTEBOX_PANEL_PORT='$ROUTEBOX_PANEL_PORT' \
+             bash /opt/RouterBOX-Fake/deploy/delend-space.sh"
+
+      - name: Verify services and HTTP endpoints
+        env:
+          ROUTERBOX_DOMAIN: ${{ inputs.routerbox_domain }}
+          ROUTEBOX_PANEL_DOMAIN: ${{ inputs.routebox_panel_domain }}
+          ROUTEBOX_PANEL_PORT: ${{ inputs.routebox_panel_port }}
+        run: |
+          ssh routerbox-vps 'systemctl --no-pager --full status routebox || true'
+          curl -fsSIL "https://$ROUTERBOX_DOMAIN" | head -20
+          curl -kfsSIL "https://$ROUTEBOX_PANEL_DOMAIN:$ROUTEBOX_PANEL_PORT" | head -20
